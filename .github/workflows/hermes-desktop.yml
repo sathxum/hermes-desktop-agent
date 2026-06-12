@@ -1,71 +1,153 @@
-name: Hermes Agent Web Dashboard
+name: Hermes Agent Desktop - Cloudflare
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  hermes-dashboard:
+  hermes-desktop:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
     - name: System Info
       run: |
         echo "========================================"
-        echo "  HERMES AGENT WEB DASHBOARD v3.0"
+        echo "  HERMES AGENT DESKTOP v4.0"
+        echo "  Official Web Dashboard + Cloudflare Tunnel"
         echo "========================================"
         echo "Runner: $(uname -a)"
-
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y curl wget git python3 python3-pip ffmpeg
-
-    - name: Install Cloudflared
-      run: |
-        curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
-        chmod +x cloudflared
-        sudo mv cloudflared /usr/local/bin/
+        echo "Time: $(date)"
+        echo ""
+        echo "STEP 1: Info OK"
 
     - name: Install Hermes Agent
       run: |
+        echo "STEP 2: Installing Hermes Agent..."
         curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-        echo "[OK] Hermes installed"
+        echo "$HOME/.hermes/bin" >> $GITHUB_PATH
+        echo "STEP 2: OK"
 
-    - name: Install Hermes Gateway
+    - name: Verify Hermes Installation
       run: |
         export PATH="$HOME/.hermes/bin:$PATH"
-        hermes gateway install
-        echo "[OK] Gateway installed"
+        echo "Hermes version:"
+        hermes --version || true
+        echo "Which hermes:"
+        which hermes || true
+        echo "STEP 3: OK"
 
-    - name: Start Web
+    - name: Start Hermes Dashboard
       run: |
-        mkdir -p /tmp/www
-        echo '<!DOCTYPE html><html><head><title>Hermes</title><style>body{background:#050505;color:#00ff88;font-family:monospace;padding:40px;max-width:900px;margin:auto}h1{border-bottom:2px dashed #00ff88;padding-bottom:10px}.status{border:1px solid #00ff88;padding:15px;margin:20px 0;background:#001100}pre{background:#001100;padding:15px;border:1px solid #003300;font-size:13px}.green{color:#0f0}.yellow{color:#ff0}.blue{color:#0ff}</style></head><body><h1> Hermes Agent Dashboard</h1><div class="status"><strong>Status:</strong> <span class="green">● Running</span></div><p><strong>Platform:</strong> Nous Research Hermes Agent</p><h3>Quick Commands</h3><pre><span class="blue">hermes</span>              Start chat<span class="blue">hermes setup</span>        Configure<span class="blue">hermes config</span>       View config</pre><p class="yellow">Note: GitHub Actions runner - active for 6 hours</p></body></html>' > /tmp/www/index.html
-        python3 -m http.server 9119 --directory /tmp/www &
-        sleep 3
-        echo "[OK] Web server running on http://localhost:9119"
+        export PATH="$HOME/.hermes/bin:$PATH"
+        echo "STEP 4: Starting Hermes Dashboard on port 9119..."
+        echo "This starts the official Hermes Web Dashboard at http://127.0.0.1:9119"
+        echo ""
+        
+        # Start the dashboard server
+        nohup hermes dashboard --port 9119 --host 0.0.0.0 --insecure > /tmp/dashboard.log 2>&1 &
+        echo "Dashboard PID: $!"
+        
+        echo "Waiting 15 sec for dashboard to start..."
+        for i in $(seq 1 15); do
+          sleep 1
+          if curl -s -o /dev/null -w "%{http_code}" http://localhost:9119 | grep -q -E "200|302"; then
+            echo "Dashboard is UP! (attempt $i)"
+            echo "STEP 4: OK"
+            break
+          fi
+          echo "Still starting... ($i/15)"
+        done
+        
+        # Show dashboard log so far
+        echo ""
+        echo "Dashboard log:"
+        head -50 /tmp/dashboard.log || true
 
-    - name: Cloudflare Tunnel
+    - name: Install Cloudflare Tunnel
       run: |
-        cloudflared tunnel --url http://localhost:9119 2>&1 | tee tunnel.log &
-        sleep 15
-        TUNNEL_URL=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" tunnel.log | head -1)
+        echo "STEP 5: Installing Cloudflared..."
+        curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
+        chmod +x /tmp/cloudflared
+        echo "STEP 5: OK"
+
+    - name: Start Cloudflare Tunnel
+      run: |
+        echo "STEP 6: Starting Cloudflare tunnel to port 9119..."
+        nohup /tmp/cloudflared tunnel --url http://localhost:9119 > /tmp/tunnel.log 2>&1 &
+        echo "Tunnel PID: $!"
+        
+        echo "Waiting 20 sec for tunnel to establish..."
+        TUNNEL_URL=""
+        for i in $(seq 1 20); do
+          sleep 1
+          TUNNEL_URL=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" /tmp/tunnel.log | head -1)
+          if [ -n "$TUNNEL_URL" ]; then
+            echo "TUNNEL UP: $TUNNEL_URL"
+            break
+          fi
+          echo "Waiting... ($i/20)"
+        done
+        
+        # Show tunnel log
+        echo ""
+        echo "=== Tunnel log ==="
+        tail -30 /tmp/tunnel.log || true
+        echo ""
+        
         if [ -n "$TUNNEL_URL" ]; then
           echo ""
           echo "============================================"
-          echo "  HERMES AGENT IS ONLINE"
+          echo "  HERMES DASHBOARD IS LIVE"
           echo "============================================"
-          echo "  URL: $TUNNEL_URL"
+          echo ""
+          echo "  PUBLIC URL: $TUNNEL_URL"
+          echo ""
+          echo "  Open this URL in your browser to access"
+          echo "  the Hermes Agent Dashboard."
+          echo ""
+          echo "  NOTE: You need to configure your AI model"
+          echo "  and API keys in the dashboard settings."
+          echo ""
+          echo "  Dashboard runs for 6 hours max."
+          echo ""
           echo "============================================"
           echo "$TUNNEL_URL" > /tmp/tunnel_url.txt
         else
-          cat tunnel.log | tail -20
+          echo ""
+          echo "WARNING: Tunnel URL not found in logs!"
+          echo "Check logs: /tmp/tunnel.log"
+          echo "STEP 6: WARNING - check logs"
         fi
 
-    - name: Keep Alive
+    - name: Verify Dashboard Accessible
       run: |
+        echo "STEP 7: Verifying dashboard..."
+        for i in $(seq 1 10); do
+          RESP=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:9119)
+          if [ "$RESP" = "200" ] || [ "$RESP" = "302" ] || [ "$RESP" = "401" ]; then
+            echo "Dashboard responded with HTTP $RESP - OK"
+            break
+          fi
+          echo "Retry $i/10... HTTP $RESP"
+          sleep 2
+        done
+        echo "STEP 7: OK"
+
+    - name: Keep Alive with Logs
+      run: |
+        echo "STEP 8: Keeping session alive for 6 hours..."
+        echo "Press Ctrl+C to stop early."
         for i in $(seq 360 -1 1); do
-          echo "Remaining: $i min"
+          if [ $((i % 10)) -eq 0 ]; then
+            echo "==== Status at $i minutes remaining ===="
+            echo "Dashboard:" && curl -s -o /dev/null -w "HTTP %{http_code}" http://localhost:9119 || true
+            if [ -f /tmp/tunnel_url.txt ]; then
+              echo " | Tunnel: $(cat /tmp/tunnel_url.txt)"
+            else
+              echo ""
+            fi
+          else
+            echo "Remaining: $i min"
+          fi
           sleep 60
         done
