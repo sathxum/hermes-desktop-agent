@@ -1,153 +1,184 @@
-name: Hermes Agent Desktop - Cloudflare
+name: Hermes Agent Desktop - Remote Dashboard v5.0
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
-  hermes-desktop:
+  hermes-dashboard:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
     - name: System Info
       run: |
-        echo "========================================"
-        echo "  HERMES AGENT DESKTOP v4.0"
-        echo "  Official Web Dashboard + Cloudflare Tunnel"
-        echo "========================================"
+        echo "══════════════════════════════════════════"
+        echo "  HERMES AGENT DESKTOP v5.0"
+        echo "  Remote Dashboard + Cloudflare Tunnel"
+        echo "══════════════════════════════════════════"
         echo "Runner: $(uname -a)"
-        echo "Time: $(date)"
-        echo ""
-        echo "STEP 1: Info OK"
+        echo "Node: $(node --version 2>/dev/null || echo 'N/A')"
+        echo "NPM: $(npm --version 2>/dev/null || echo 'N/A')"
+
+    - name: Install Node.js & npm
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl wget git ca-certificates ffmpeg
+        # Ensure Node.js 20+ is installed
+        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+        echo "Node: $(node --version)"
+        echo "NPM: $(npm --version)"
 
     - name: Install Hermes Agent
       run: |
-        echo "STEP 2: Installing Hermes Agent..."
+        echo "STEP 1: Installing Hermes Agent..."
         curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-        echo "$HOME/.hermes/bin" >> $GITHUB_PATH
-        echo "STEP 2: OK"
+        echo ""
+        echo "Hermes installed to: $HOME/.hermes"
+        export PATH="$HOME/.hermes/bin:$PATH"
+        which hermes || echo "WARNING: hermes not in PATH"
 
-    - name: Verify Hermes Installation
+    - name: Verify Hermes & Pre-build Web UI
       run: |
         export PATH="$HOME/.hermes/bin:$PATH"
-        echo "Hermes version:"
-        hermes --version || true
-        echo "Which hermes:"
-        which hermes || true
-        echo "STEP 3: OK"
+        echo "STEP 2: Hermes version:"
+        hermes --version 2>&1 || true
+        
+        echo ""
+        echo "Pre-building web UI npm dependencies..."
+        HERMES_WEB="$HOME/.hermes/hermes-agent/website/dashboard" 2>/dev/null || true
+        if [ -d "$HERMES_WEB" ]; then
+          echo "Found web UI at: $HERMES_WEB"
+          cd "$HERMES_WEB"
+          npm install 2>&1 | tail -10 || true
+        else
+          echo "Web UI dir not found at expected path, checking alternatives..."
+          find "$HOME/.hermes" -maxdepth 4 -name "package.json" -path "*/web*" 2>/dev/null | head -5 || true
+          find / -path "*/hermes-agent/website" -maxdepth 6 2>/dev/null | head -5 || true
+        fi
+        
+        # Check where hermes command lives
+        echo "Hermes binary location:"
+        which hermes
+        ls -la "$HOME/.hermes/bin/" 2>/dev/null || true
 
     - name: Start Hermes Dashboard
       run: |
         export PATH="$HOME/.hermes/bin:$PATH"
-        echo "STEP 4: Starting Hermes Dashboard on port 9119..."
-        echo "This starts the official Hermes Web Dashboard at http://127.0.0.1:9119"
+        echo "STEP 3: Starting Hermes Web Dashboard on port 9119..."
         echo ""
         
-        # Start the dashboard server
-        nohup hermes dashboard --port 9119 --host 0.0.0.0 --insecure > /tmp/dashboard.log 2>&1 &
-        echo "Dashboard PID: $!"
+        # Set auth token for security
+        ACTION_SECRET=$(openssl rand -hex 24)
+        echo "::add-mask::$ACTION_SECRET"
+        echo "HERMES_API_SECRET=$ACTION_SECRET" >> $GITHUB_ENV
+        export HERMES_API_SECRET="$ACTION_SECRET"
         
-        echo "Waiting 15 sec for dashboard to start..."
-        for i in $(seq 1 15); do
-          sleep 1
-          if curl -s -o /dev/null -w "%{http_code}" http://localhost:9119 | grep -q -E "200|302"; then
-            echo "Dashboard is UP! (attempt $i)"
-            echo "STEP 4: OK"
+        # Start dashboard (nohup to keep running after this step)
+        nohup hermes dashboard --port 9119 --host 0.0.0.0 --insecure           --api-secret "$ACTION_SECRET" > /tmp/dashboard.log 2>&1 &
+        HERME_PID=$!
+        echo "Dashboard PID: $HERME_PID"
+        echo "$HERME_PID" > /tmp/hermes.pid
+        
+        # Wait up to 120 seconds for dashboard
+        echo ""
+        echo "Waiting up to 120 seconds for dashboard to build and start..."
+        DASHBOARD_UP=false
+        for i in $(seq 1 60); do
+          sleep 2
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:9119 2>/dev/null || echo "000")
+          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "302" ]; then
+            echo "✅ Dashboard is UP! (HTTP $HTTP_STATUS, attempt $((i*2))s)"
+            DASHBOARD_UP=true
             break
           fi
-          echo "Still starting... ($i/15)"
+          # Show progress every 20 sec
+          if [ $((i % 10)) -eq 0 ] && [ $i -lt 60 ]; then
+            echo "  ... still building (${i}/60 checks, ~$((i*2))s elapsed)"
+          fi
         done
         
-        # Show dashboard log so far
-        echo ""
-        echo "Dashboard log:"
-        head -50 /tmp/dashboard.log || true
+        if [ "$DASHBOARD_UP" = "false" ]; then
+          echo ""
+          echo "⚠️ Dashboard may still be building after 120s. Showing log tail:"
+          echo "---"
+          tail -30 /tmp/dashboard.log
+          echo "---"
+          echo "Continuing anyway (build may complete in background)..."
+        fi
 
     - name: Install Cloudflare Tunnel
       run: |
-        echo "STEP 5: Installing Cloudflared..."
-        curl -sL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /tmp/cloudflared
-        chmod +x /tmp/cloudflared
-        echo "STEP 5: OK"
+        echo "STEP 6: Installing cloudflared..."
+        curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+        chmod +x cloudflared
+        sudo mv cloudflared /usr/local/bin/
+        which cloudflared
 
     - name: Start Cloudflare Tunnel
       run: |
-        echo "STEP 6: Starting Cloudflare tunnel to port 9119..."
-        nohup /tmp/cloudflared tunnel --url http://localhost:9119 > /tmp/tunnel.log 2>&1 &
-        echo "Tunnel PID: $!"
+        echo "STEP 7: Starting Cloudflare Tunnel..."
+        nohup cloudflared tunnel --url http://localhost:9119 > /tmp/tunnel.log 2>&1 &
+        CLOUD_PID=$!
+        echo "Cloudflared PID: $CLOUD_PID"
         
-        echo "Waiting 20 sec for tunnel to establish..."
-        TUNNEL_URL=""
-        for i in $(seq 1 20); do
-          sleep 1
-          TUNNEL_URL=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" /tmp/tunnel.log | head -1)
-          if [ -n "$TUNNEL_URL" ]; then
-            echo "TUNNEL UP: $TUNNEL_URL"
-            break
-          fi
-          echo "Waiting... ($i/20)"
-        done
+        # Wait for tunnel URL
+        echo ""
+        echo "Waiting 20 seconds for tunnel to establish..."
+        sleep 20
         
-        # Show tunnel log
-        echo ""
-        echo "=== Tunnel log ==="
-        tail -30 /tmp/tunnel.log || true
-        echo ""
+        TUNNEL_URL=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" /tmp/tunnel.log | head -1)
         
         if [ -n "$TUNNEL_URL" ]; then
           echo ""
-          echo "============================================"
-          echo "  HERMES DASHBOARD IS LIVE"
-          echo "============================================"
+          echo "╔══════════════════════════════════════════╗"
+          echo "║     🎉 HERMES AGENT IS LIVE ONLINE!     ║"
+          echo "╚══════════════════════════════════════════╝"
           echo ""
-          echo "  PUBLIC URL: $TUNNEL_URL"
+          echo "  ➤ PUBLIC URL: $TUNNEL_URL"
           echo ""
-          echo "  Open this URL in your browser to access"
-          echo "  the Hermes Agent Dashboard."
+          echo "  💬 Access the official Hermes Web Dashboard"
+          echo "  📱 Then connect via the Hermes Desktop App"
           echo ""
-          echo "  NOTE: You need to configure your AI model"
-          echo "  and API keys in the dashboard settings."
-          echo ""
-          echo "  Dashboard runs for 6 hours max."
-          echo ""
-          echo "============================================"
           echo "$TUNNEL_URL" > /tmp/tunnel_url.txt
+          echo "$HERMES_API_SECRET" > /tmp/hermes_secret.txt
         else
+          echo"
+          echo "⚠️ Tunnel URL not found yet. Checking logs..."
+          tail -30 /tmp/tunnel.log
           echo ""
-          echo "WARNING: Tunnel URL not found in logs!"
-          echo "Check logs: /tmp/tunnel.log"
-          echo "STEP 6: WARNING - check logs"
+          echo "Dashboard local status:"
+          curl -s -o /dev/null -w "HTTP %{http_code}" http://localhost:9119 2>/dev/null || echo "(not responding yet)"
         fi
 
-    - name: Verify Dashboard Accessible
+    - name: Display Final Connection Info
       run: |
-        echo "STEP 7: Verifying dashboard..."
-        for i in $(seq 1 10); do
-          RESP=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:9119)
-          if [ "$RESP" = "200" ] || [ "$RESP" = "302" ] || [ "$RESP" = "401" ]; then
-            echo "Dashboard responded with HTTP $RESP - OK"
-            break
-          fi
-          echo "Retry $i/10... HTTP $RESP"
-          sleep 2
-        done
-        echo "STEP 7: OK"
+        echo ""
+        echo "══════════════════════════════════════════════"
+        echo "  📋 CONNECTION INFORMATION"
+        echo "══════════════════════════════════════════════"
+        echo ""
+        if [ -f /tmp/tunnel_url.txt ]; then
+          echo "  ➤ Your Hermes Dashboard URL:"
+          echo "     $(cat /tmp/tunnel_url.txt)"
+          echo ""
+        fi
+        if [ -f /tmp/hermes_secret.txt ]; then
+          echo "  🔐 Auth Secret (for Desktop app connection):"
+          echo "     $(cat /tmp/hermes_secret.txt)"
+          echo ""
+        fi
+        echo "  ⏱  Hermes is running for 6 hours (360 min)"
+        echo "══════════════════════════════════════════════"
 
-    - name: Keep Alive with Logs
+    - name: Keep Alive (6 hours)
       run: |
-        echo "STEP 8: Keeping session alive for 6 hours..."
-        echo "Press Ctrl+C to stop early."
         for i in $(seq 360 -1 1); do
-          if [ $((i % 10)) -eq 0 ]; then
-            echo "==== Status at $i minutes remaining ===="
-            echo "Dashboard:" && curl -s -o /dev/null -w "HTTP %{http_code}" http://localhost:9119 || true
-            if [ -f /tmp/tunnel_url.txt ]; then
-              echo " | Tunnel: $(cat /tmp/tunnel_url.txt)"
-            else
-              echo ""
-            fi
-          else
-            echo "Remaining: $i min"
+          echo "⏱ Remaining: $i minutes"
+          # Show dashboard status every 60 min
+          if [ $((i % 60)) -eq 0 ]; then
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:9119 2>/dev/null || echo "N/A")
+            echo "  Dashboard status: HTTP $STATUS"
           fi
           sleep 60
         done
