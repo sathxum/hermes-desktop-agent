@@ -1,380 +1,275 @@
-name: Hermes Agent Desktop with Cloudflare Tunnel
+name: Hermes Agent Desktop + Cloudflare Tunnel
 on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
 
+env:
+  HERMES_VERSION: "latest"
+  TUNNEL_PORT: 8642
+
 jobs:
-  deploy-hermes:
+  deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 350
     
     steps:
-    - name: System Info
+    - name: 📋 System Information
       run: |
-        echo "========================================"
-        echo "  HERMES AGENT DESKTOP DEPLOYMENT"
-        echo "  Cloudflare Tunnel Edition v1.0"
-        echo "========================================"
+        echo "═══════════════════════════════════════════════════"
+        echo "   HERMES AGENT DESKTOP - CLOUDFLARE EDITION"
+        echo "═══════════════════════════════════════════════════"
         echo "Runner: $(uname -a)"
-        echo "Time: $(date)"
+        echo "Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
         echo "Duration: 6 hours max"
+        echo "═══════════════════════════════════════════════════"
 
-    - name: Install System Dependencies
+    - name: 📦 Install System Dependencies
       run: |
-        sudo apt-get update
+        sudo apt-get update -qq
         sudo apt-get install -y \
           curl wget git \
+          python3 python3-pip python3-venv \
+          nodejs npm \
           ffmpeg \
-          build-essential \
           xvfb \
-          x11-xserver-utils \
           dbus-x11 \
           x11-utils \
-          x11-apps \
-          net-tools \
-          jq \
-          unzip
-        echo "[OK] System dependencies installed"
+          x11-xserver-utils \
+          xdotool \
+          chromium-browser \
+          2>/dev/null || true
 
-    - name: Setup Node.js v22
-      uses: actions/setup-node@v4
-      with:
-        node-version: '22'
-
-    - name: Install Python 3.11
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-
-    - name: Install uv (Fast Python Package Manager)
+    - name: 🐳 Install Docker (for container tools)
       run: |
-        curl -LsSf https://astral.sh/uv/install.sh | sh
-        echo "$HOME/.local/bin" >> $GITHUB_PATH
-        export PATH="$HOME/.local/bin:$PATH"
-        uv --version
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sudo sh get-docker.sh 2>/dev/null || true
+        sudo usermod -aG docker $USER || true
 
-    - name: Clone Hermes Agent Repository
+    - name: 🚀 Install Hermes Agent
       run: |
-        git clone https://github.com/NousResearch/hermes-agent.git
-        cd hermes-agent
-        echo "[OK] Hermes Agent cloned"
-        echo "Commit: $(git rev-parse HEAD)"
-        echo "Branch: $(git branch --show-current)"
-
-    - name: Install Hermes Agent
-      run: |
-        cd hermes-agent
-        export PATH="$HOME/.local/bin:$PATH"
-        
-        # Create virtual environment
-        uv venv .venv --python 3.11
-        source .venv/bin/activate
-        
-        # Install Hermes with all dependencies
-        uv pip install -e ".[all,dev]"
-        
+        echo "[INFO] Installing Hermes Agent..."
+        curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
         echo "[OK] Hermes Agent installed"
-        hermes --version || echo "Hermes installed"
 
-    - name: Install Playwright Browsers
+    - name: ⚙️ Configure Hermes
       run: |
-        cd hermes-agent
-        source .venv/bin/activate
-        playwright install chromium
-        playwright install-deps chromium
-        echo "[OK] Playwright browsers installed"
-
-    - name: Configure Hermes Agent
-      run: |
-        cd hermes-agent
-        source .venv/bin/activate
+        export PATH="$HOME/.local/bin:$PATH"
+        
+        # Set default config
         mkdir -p ~/.hermes
         
-        # Set default model (can be changed later)
-        hermes config set model openrouter/auto
-        
-        # Set terminal backend to safe mode
-        hermes config set terminal.backend docker
-        
-        # Create basic profile
-        cat > ~/.hermes/profile.yaml << 'EOF'
-        name: "Hermes Desktop Agent"
-        model: "openrouter/auto"
-        system_prompt: |
-          You are Hermes, a self-improving AI agent running on GitHub Actions.
-          You have full browser automation capabilities and can browse the web.
-          You are connected via Cloudflare tunnel and accessible globally.
-          Help users with research, coding, automation, and general tasks.
-        tools:
-          - browser_use
-          - code_execution
-          - file_operations
-          - web_search
-        EOF
-        
-        echo "[OK] Hermes configured"
+        # Check if hermes command exists
+        if command -v hermes &> /dev/null; then
+          echo "[OK] Hermes CLI found"
+          hermes --version || echo "Version check failed"
+        else
+          echo "[WARN] Hermes CLI not in PATH, checking install locations..."
+          ls -la ~/.hermes/ 2>/dev/null || echo "No ~/.hermes directory"
+          ls -la /usr/local/bin/hermes 2>/dev/null || echo "No /usr/local/bin/hermes"
+        fi
 
-    - name: Install & Setup Cloudflare Tunnel
-      env:
-        CF_TUNNEL_TOKEN: ${{ secrets.CF_TUNNEL_TOKEN }}
+    - name: 🌐 Install Cloudflare Tunnel (cloudflared)
       run: |
-        # Download cloudflared
+        echo "[INFO] Installing cloudflared..."
         wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
         chmod +x cloudflared
         sudo mv cloudflared /usr/local/bin/
-        
-        echo "[OK] Cloudflared installed: $(cloudflared --version)"
+        cloudflared --version
+        echo "[OK] Cloudflared installed"
 
-    - name: Start Cloudflare Tunnel (Quick Tunnel)
-      id: tunnel
+    - name: 🔧 Start Hermes Web Dashboard
       run: |
-        # Start quick tunnel (no account needed, temporary URL)
-        # This gives us a public URL like https://xxx.trycloudflare.com
-        nohup cloudflared tunnel --url http://localhost:8642 > tunnel.log 2>&1 &
-        TUNNEL_PID=$!
-        echo "Tunnel PID: $TUNNEL_PID"
+        export PATH="$HOME/.local/bin:$PATH"
         
-        # Wait for tunnel to establish
-        sleep 8
+        echo "[INFO] Starting Hermes web interface..."
         
-        # Extract the public URL from logs
-        TUNNEL_URL=""
-        for i in {1..30}; do
-          TUNNEL_URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' tunnel.log | head -1 || true)
-          if [ -n "$TUNNEL_URL" ]; then
-            break
-          fi
-          sleep 2
-        done
-        
-        if [ -z "$TUNNEL_URL" ]; then
-          echo "[WARN] Could not extract tunnel URL, using fallback"
-          TUNNEL_URL="https://$(grep -o 'Your quick Tunnel is ready! Access it at: [^ ]*' tunnel.log | awk '{print $NF}' || echo 'pending')"
+        # Try to start Hermes gateway if available
+        if command -v hermes &> /dev/null; then
+          hermes gateway run --host 0.0.0.0 --port ${TUNNEL_PORT} &
+          HERMES_PID=$!
+          echo "Hermes PID: $HERMES_PID"
         fi
         
-        echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
-        echo ""
-        echo "========================================"
-        echo "  CLOUDFLARE TUNNEL ESTABLISHED!"
-        echo "  Public URL: $TUNNEL_URL"
-        echo "========================================"
+        # Give it time to start
+        sleep 10
+        
+        # Fallback: Start a simple status page on same port
+        if ! curl -s http://localhost:${TUNNEL_PORT} > /dev/null 2>&1; then
+          echo "[INFO] Starting fallback status server..."
+          python3 << 'SERVER' &
+import http.server
+import socketserver
+import json
+import os
+from datetime import datetime
 
-    - name: Start Hermes Web Dashboard
-      run: |
-        cd hermes-agent
-        source .venv/bin/activate
-        
-        # Set environment for web server
-        export HERMES_WEB_HOST=0.0.0.0
-        export HERMES_WEB_PORT=8642
-        
-        # Start Hermes gateway/web interface
-        nohup hermes gateway run --host 0.0.0.0 --port 8642 > hermes.log 2>&1 &
-        HERMES_PID=$!
-        echo "Hermes PID: $HERMES_PID"
-        
-        sleep 5
-        
-        # Check if running
-        if curl -s http://localhost:8642/health > /dev/null 2>&1; then
-          echo "[OK] Hermes Dashboard is running"
-        else
-          echo "[INFO] Starting fallback web server..."
-          # Fallback: simple Python HTTP server with status page
-          python3 << 'PYEOF' &
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import json, os, socket
+PORT = 8642
 
-class Handler(BaseHTTPRequestHandler):
+class StatusHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header('Content-Type', 'text/html')
+        self.send_header('Content-type', 'text/html')
         self.end_headers()
-        html = '''
-<!DOCTYPE html>
+        
+        html = '''<!DOCTYPE html>
 <html>
 <head>
-    <title>Hermes Agent Dashboard</title>
+    <title>Hermes Agent - GitHub Actions</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 100%);
-            color: #e0e0e0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #e2e8f0;
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
         }
         .container {
-            background: rgba(20, 20, 35, 0.9);
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(0, 243, 255, 0.2);
-            border-radius: 20px;
+            max-width: 800px;
             padding: 40px;
-            max-width: 600px;
             text-align: center;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
         }
         h1 {
-            font-size: 2.5em;
-            margin-bottom: 10px;
-            background: linear-gradient(90deg, #00f3ff, #bc13fe);
+            font-size: 3rem;
+            background: linear-gradient(135deg, #06b6d4, #8b5cf6);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
         }
-        .status {
+        .subtitle {
+            color: #94a3b8;
+            margin-bottom: 30px;
+        }
+        .status-card {
+            background: rgba(30, 41, 59, 0.8);
+            border-radius: 16px;
+            padding: 30px;
+            margin: 20px 0;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+        }
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 0;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+        }
+        .status-label { color: #94a3b8; }
+        .status-value { color: #06b6d4; font-weight: 600; }
+        .pulse {
             display: inline-block;
-            padding: 8px 20px;
-            background: rgba(10, 255, 10, 0.15);
-            border: 1px solid #0aff0a;
-            border-radius: 20px;
-            color: #0aff0a;
-            margin: 20px 0;
-            font-weight: 600;
+            width: 12px;
+            height: 12px;
+            background: #22c55e;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+            margin-right: 8px;
         }
-        .info { color: #888; margin: 10px 0; }
-        .url-box {
-            background: rgba(0,0,0,0.3);
-            padding: 15px;
-            border-radius: 10px;
-            margin: 20px 0;
-            word-break: break-all;
-        }
-        .url { color: #00f3ff; font-family: monospace; font-size: 0.9em; }
-        .features {
-            text-align: left;
-            margin: 20px 0;
-            padding-left: 20px;
-        }
-        .features li { margin: 8px 0; color: #aaa; }
-        .warning {
-            background: rgba(255, 170, 0, 0.1);
-            border: 1px solid #ffaa00;
-            border-radius: 10px;
-            padding: 15px;
-            margin-top: 20px;
-            color: #ffaa00;
-            font-size: 0.85em;
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(0.9); }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🚀 Hermes Agent</h1>
-        <div class="status">● RUNNING</div>
-        <p class="info">Self-Improving AI Agent • Desktop Mode</p>
+        <p class="subtitle">Self-Improving AI Agent • Running on GitHub Actions</p>
         
-        <div class="url-box">
-            <small style="color:#888">This URL is accessible via Cloudflare Tunnel:</small><br>
-            <span class="url" id="tunnelUrl">Loading...</span>
+        <div class="status-card">
+            <div class="status-item">
+                <span class="status-label">Status</span>
+                <span class="status-value"><span class="pulse"></span>Running</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Environment</span>
+                <span class="status-value">GitHub Actions Runner</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">OS</span>
+                <span class="status-value">Ubuntu Latest</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Tunnel</span>
+                <span class="status-value">Cloudflare Tunnel</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Session</span>
+                <span class="status-value">''' + str(datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')) + '''</span>
+            </div>
         </div>
         
-        <ul class="features">
-            <li>✓ Browser Automation (Playwright)</li>
-            <li>✓ Long-term Memory & Learning</li>
-            <li>✓ Multi-tool Integration</li>
-            <li>✓ WebSocket Chat Interface</li>
-            <li>✓ Self-Improving Skills</li>
-        </ul>
-        
-        <div class="warning">
-            ⚠️ Session runs for 6 hours max.<br>
-            Connect to the WebSocket endpoint for interactive chat.
-        </div>
-        
-        <p style="margin-top: 30px; color: #666; font-size: 0.8em;">
-            Powered by Nous Research • Hermes Agent v2026<br>
-            Running on GitHub Actions • Exposed via Cloudflare Tunnel
+        <p style="color: #64748b; margin-top: 20px; font-size: 0.9rem;">
+            Remote access via Cloudflare Tunnel (check Actions logs for URL)
         </p>
     </div>
-    <script>
-        // Try to get tunnel URL from environment
-        const url = window.location.href;
-        document.getElementById('tunnelUrl').textContent = url;
-    </script>
 </body>
-</html>
-'''
+</html>'''
         self.wfile.write(html.encode())
+    
     def log_message(self, format, *args):
-        print(f"[HTTP] {args[0]}")
+        pass  # Suppress logging
 
-print("Starting dashboard server on port 8642...")
-server = HTTPServer(('0.0.0.0', 8642), Handler)
-server.serve_forever()
-PYEOF
-          echo "[OK] Fallback dashboard started"
+with socketserver.TCPServer(("", PORT), StatusHandler) as httpd:
+    print(f"Status server running on port {PORT}")
+    httpd.serve_forever()
+SERVER
+          echo "[OK] Status server started on port ${TUNNEL_PORT}"
         fi
 
-    - name: Display Connection Information
+    - name: 🌍 Start Cloudflare Tunnel (Quick Tunnel)
       run: |
-        TUNNEL_URL="${{ steps.tunnel.outputs.tunnel_url }}"
+        echo "[INFO] Starting Cloudflare Quick Tunnel..."
+        echo "This creates a public URL without needing Cloudflare account"
+        echo ""
         
-        echo ""
-        echo "╔══════════════════════════════════════════════════════════╗"
-        echo "║         HERMES AGENT DESKTOP - CONNECTION INFO           ║"
-        echo "╠══════════════════════════════════════════════════════════╣"
-        echo "║                                                          ║"
-        echo "║  🌐 Public URL:                                         ║"
-        echo "║  $TUNNEL_URL"
-        echo "║                                                          ║"
-        echo "║  📊 Dashboard:  $TUNNEL_URL                             ║"
-        echo "║  🔌 WebSocket:  $TUNNEL_URL/ws                           ║"
-        echo "║  🔌 API:        $TUNNEL_URL/api                          ║"
-        echo "║                                                          ║"
-        echo "║  ⏱️  Session Active: 6 hours max                          ║"
-        echo "║                                                          ║"
-        echo "╚══════════════════════════════════════════════════════════╝"
-        echo ""
-        echo "Hermes Agent is now running and accessible!"
-        echo "Open the dashboard URL above in your browser."
+        # Start tunnel in background
+        cloudflared tunnel --url http://localhost:${TUNNEL_PORT} 2>&1 | tee /tmp/tunnel.log &
+        TUNNEL_PID=$!
+        
+        # Wait for tunnel to start and extract URL
+        echo "[INFO] Waiting for tunnel URL..."
+        sleep 15
+        
+        TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/tunnel.log | head -1)
+        
+        if [ -n "$TUNNEL_URL" ]; then
+          echo ""
+          echo "═══════════════════════════════════════════════════"
+          echo "🎉 TUNNEL ESTABLISHED!"
+          echo "═══════════════════════════════════════════════════"
+          echo ""
+          echo "📱 PUBLIC ACCESS URL:"
+          echo "   $TUNNEL_URL"
+          echo ""
+          echo "═══════════════════════════════════════════════════"
+          echo ""
+          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+        else
+          echo "[WARN] Could not extract tunnel URL, check /tmp/tunnel.log"
+          cat /tmp/tunnel.log
+        fi
 
-    - name: Keep Session Alive (6 Hours)
+    - name: ⏱️ Keep Session Alive (6 Hours)
       run: |
-        echo "🚀 Hermes Agent Desktop is LIVE!"
-        echo "📑 Dashboard URL: ${{ steps.tunnel.outputs.tunnel_url }}"
         echo ""
-        echo "Session will remain active for 6 hours..."
-        echo "Press Ctrl+C or wait for timeout."
+        echo "═══════════════════════════════════════════════════"
+        echo "   🔴 LIVE SESSION STARTED"
+        echo "═══════════════════════════════════════════════════"
+        echo ""
+        echo "Access your Hermes Agent at:"
+        echo "${{ env.TUNNEL_URL }}"
+        echo ""
+        echo "Session will run for 6 hours max."
+        echo "Check the Actions logs above for the tunnel URL."
         echo ""
         
         # Keep alive loop
-        for i in {360..1}; do
-          echo "[HERMES] Active - $i minutes remaining"
-          
-          # Health check
-          if curl -s http://localhost:8642/health > /dev/null 2>&1; then
-            echo "  ✓ Dashboard: OK"
-          else
-            echo "  ⚠ Dashboard: Checking..."
-          fi
-          
-          # Check tunnel
-          if pgrep -f cloudflared > /dev/null; then
-            echo "  ✓ Tunnel: Active"
-          else
-            echo "  ✗ Tunnel: Down - Restarting..."
-            nohup cloudflared tunnel --url http://localhost:8642 > tunnel.log 2>&1 &
-          fi
-          
-          # Log tunnel URL every 30 minutes
-          if [ $((i % 30)) -eq 0 ]; then
-            echo ""
-            echo "📢 Public URL: ${{ steps.tunnel.outputs.tunnel_url }}"
-          fi
-          
+        for i in $(seq 1 360); do
+          echo "[$(date -u '+%H:%M:%S')] Session active • ${i}/360 minutes • Remaining: $((360-i)) minutes"
           sleep 60
         done
-        
-        echo "Session complete. Thank you for using Hermes Agent!"
-
-    - name: Cleanup on Exit
-      if: always()
-      run: |
-        echo "Shutting down Hermes Agent..."
-        pkill -f "hermes" || true
-        pkill -f "cloudflared" || true
-        pkill -f "python.*8642" || true
-        echo "Cleanup complete."
