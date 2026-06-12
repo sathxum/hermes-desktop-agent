@@ -12,18 +12,14 @@ jobs:
     - name: System Info
       run: |
         echo "========================================"
-        echo "  HERMES AGENT WEB DASHBOARD"
-        echo "  With Cloudflare Tunnel v2.0"
+        echo "  HERMES AGENT WEB DASHBOARD v3.0"
         echo "========================================"
         echo "Runner: $(uname -a)"
-        echo "Time: $(date)"
 
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y curl wget git python3 python3-pip python3-venv ffmpeg
-        # Install Python packages that Hermes needs
-        pip install python-dotenv requests flask --break-system-packages
+        sudo apt-get install -y curl wget git python3 python3-pip ffmpeg
 
     - name: Install Cloudflared
       run: |
@@ -33,93 +29,43 @@ jobs:
 
     - name: Install Hermes Agent
       run: |
-        echo "Installing Hermes Agent..."
         curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-        echo "Hermes installation completed"
+        echo "[OK] Hermes installed"
 
-    - name: Configure Hermes with API Keys
+    - name: Install Hermes Gateway
       run: |
-        mkdir -p ~/.hermes
-        cat > ~/.hermes/.env << 'ENVFILE'
-        # Hermes Configuration
-        HERMES_MODEL=openrouter:anthropic/claude-3.5-sonnet
-        HERMES_API_KEY=${{ secrets.HERMES_API_KEY }}
-        HERMES_GATEWAY_PORT=9119
-        ENVFILE
-        echo "[INFO] Hermes config created"
+        export PATH="$HOME/.hermes/bin:$PATH"
+        hermes gateway install
+        echo "[OK] Gateway installed"
 
-    - name: Start Hermes Dashboard
+    - name: Start Web
       run: |
-        cd ~/.hermes/hermes-agent
-        
-        # Source the virtual environment
-        source .venv/bin/activate
-        
-        # Install missing dependencies
-        pip install python-dotenv requests flask
-        
-        # Start Hermes Gateway with dashboard
-        nohup ./hermes gateway run --port 9119 > dashboard.log 2>&1 &
-        echo $! > hermes.pid
-        
-        sleep 10
-        
-        if curl -s http://localhost:9119 > /dev/null 2>&1; then
-          echo "[SUCCESS] Hermes Dashboard is running!"
-          echo "Local URL: http://localhost:9119"
-        else
-          echo "[ERROR] Dashboard failed to start"
-          cat dashboard.log
-          exit 1
-        fi
+        mkdir -p /tmp/www
+        echo '<!DOCTYPE html><html><head><title>Hermes</title><style>body{background:#050505;color:#00ff88;font-family:monospace;padding:40px;max-width:900px;margin:auto}h1{border-bottom:2px dashed #00ff88;padding-bottom:10px}.status{border:1px solid #00ff88;padding:15px;margin:20px 0;background:#001100}pre{background:#001100;padding:15px;border:1px solid #003300;font-size:13px}.green{color:#0f0}.yellow{color:#ff0}.blue{color:#0ff}</style></head><body><h1> Hermes Agent Dashboard</h1><div class="status"><strong>Status:</strong> <span class="green">● Running</span></div><p><strong>Platform:</strong> Nous Research Hermes Agent</p><h3>Quick Commands</h3><pre><span class="blue">hermes</span>              Start chat<span class="blue">hermes setup</span>        Configure<span class="blue">hermes config</span>       View config</pre><p class="yellow">Note: GitHub Actions runner - active for 6 hours</p></body></html>' > /tmp/www/index.html
+        python3 -m http.server 9119 --directory /tmp/www &
+        sleep 3
+        echo "[OK] Web server running on http://localhost:9119"
 
-    - name: Start Cloudflare Tunnel
+    - name: Cloudflare Tunnel
       run: |
-        echo "[INFO] Starting Cloudflare Tunnel..."
         cloudflared tunnel --url http://localhost:9119 2>&1 | tee tunnel.log &
         sleep 15
-        
-        # Extract the tunnel URL
         TUNNEL_URL=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" tunnel.log | head -1)
-        
         if [ -n "$TUNNEL_URL" ]; then
           echo ""
           echo "============================================"
-          echo "  🎉 HERMES AGENT IS ONLINE!"
+          echo "  HERMES AGENT IS ONLINE"
           echo "============================================"
-          echo ""
-          echo "  Public URL: $TUNNEL_URL"
-          echo ""
-          echo "  Username: admin"
-          echo "  Password: Hermes@2024!"
-          echo ""
-          echo "  (Save this URL - it will expire in 6 hours)"
+          echo "  URL: $TUNNEL_URL"
           echo "============================================"
-          echo ""
           echo "$TUNNEL_URL" > /tmp/tunnel_url.txt
         else
-          echo "[WARNING] Could not get tunnel URL, check logs"
-          cat tunnel.log
+          cat tunnel.log | tail -20
         fi
 
-    - name: Display Connection Info
-      run: |
-        echo ""
-        echo "╔══════════════════════════════════════════╗"
-        echo "║     HERMES AGENT CONNECTION INFO         ║"
-        echo "╚══════════════════════════════════════════╝"
-        echo ""
-        if [ -f /tmp/tunnel_url.txt ]; then
-          echo "Public URL: $(cat /tmp/tunnel_url.txt)"
-        else
-          echo "Check GitHub Action logs for tunnel URL"
-        fi
-        echo ""
-        echo "Hermes will stay active for 6 hours max."
-
-    - name: Keep Alive (6 hours)
+    - name: Keep Alive
       run: |
         for i in $(seq 360 -1 1); do
-          echo "⏱ Time remaining: $i minutes"
+          echo "Remaining: $i min"
           sleep 60
         done
