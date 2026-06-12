@@ -1,0 +1,99 @@
+name: Hermes Desktop v7 - Public Dashboard
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - ".github/workflows/hermes-agent.yml"
+  workflow_dispatch:
+
+jobs:
+  hermes:
+    name: Hermes Dashboard + Cloudflare
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+
+    - name: System Info
+      run: uname -a
+
+    - name: Install basics
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq curl wget git ca-certificates ffmpeg > /dev/null
+        curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash - > /dev/null
+        sudo apt-get install -y -qq nodejs
+        node --version
+
+    - name: Install Hermes
+      run: |
+        curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+        echo "$HOME/.hermes/bin" >> $GITHUB_PATH
+        echo "$HOME/.hermes/bin:$PATH"
+
+    - name: Build Web UI
+      run: |
+        WEBDIR="$HOME/.hermes/hermes-agent/website/dashboard"
+        if [ -d "$WEBDIR" ]; then
+          cd "$WEBDIR"
+          npm install --no-progress > /dev/null 2>&1
+          npm run build 2>&1 | tail -5 || echo "build step skipped"
+        fi
+
+    - name: Start Dashboard
+      run: |
+        PATH="$HOME/.hermes/bin:$PATH"
+        nohup hermes dashboard --port 9119 --host 0.0.0.0 --insecure > /tmp/hermes.log 2>&1 &
+        echo "hermes_pid=$!" >> $GITHUB_ENV
+        for i in $(seq 1 180); do
+          sleep 1
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:9119 2>/dev/null || true)
+          if [ "$CODE" = "200" ] || [ "$CODE" = "302" ]; then
+            echo "[OK] Dashboard UP (HTTP $CODE, ${i}s)"
+            exit 0
+          fi
+          [ $((i % 30)) -eq 0 ] && echo "  attempt $i..." && tail -2 /tmp/hermes.log
+        done
+        echo "[WARN] Dashboard not responding. log:"
+        tail -20 /tmp/hermes.log
+        echo "Continuing anyway..."
+        exit 0
+
+    - name: Install Cloudflared
+      run: |
+        curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+        chmod +x cloudflared && sudo mv cloudflared /usr/local/bin/
+
+    - name: Start Tunnel & Save URL
+      id: tunnel
+      run: |
+        nohup cloudflared tunnel --url http://localhost:9119 > /tmp/cf.log 2>&1 &
+        sleep 20
+        URL=$(grep -oE "https://[a-zA-Z0-9-]+\.trycloudflare\.com" /tmp/cf.log | head -1)
+        if [ -n "$URL" ]; then
+          echo ""
+          echo "============================================"
+          echo "HERMES LIVE: $URL"
+          echo "============================================"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "$URL" > /tmp/tunnel_url.txt
+        else
+          echo "URL not found, showing log:"
+          tail -15 /tmp/cf.log
+        fi
+
+    - name: Summary
+      run: |
+        echo "### Hermes Dashboard v7" >> $GITHUB_STEP_SUMMARY
+        if [ -f /tmp/tunnel_url.txt ]; then
+          echo "URL: $(cat /tmp/tunnel_url.txt)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "Check logs for URL" >> $GITHUB_STEP_SUMMARY
+        fi
+
+    - name: Keep Alive
+      run: |
+        for i in $(seq 360 -1 1); do
+          echo "Remaining: ${i} min"
+          [ $((i % 60)) -eq 0 ] && curl -s -o /dev/null -w "HTTP %{http_code} " http://localhost:9119 2>/dev/null || true
+          sleep 60
+        done
