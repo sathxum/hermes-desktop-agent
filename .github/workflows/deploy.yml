@@ -1,0 +1,102 @@
+name: Deploy Hermes Web UI
+
+on:
+  workflow_dispatch:
+    inputs:
+      password:
+        description: 'Access Password'
+        required: true
+        default: 'Hermes2024!'
+      port:
+        description: 'Port'
+        required: false
+        default: '6060'
+
+env:
+  PORT: ${{ github.event.inputs.port || '6060' }}
+  IMAGE: ekkoye8888/hermes-web-ui
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Create dirs
+        run: |
+          mkdir -p ./hermes_data ./workspace
+      
+      - name: Create compose
+        run: |
+          cat > docker-compose.yml << 'YAML'
+version: "3.9"
+services:
+  hermes:
+    image: ekkoye8888/hermes-web-ui
+    container_name: hermes-webui
+    restart: always
+    ports:
+      - "${{ env.PORT }}:${{ env.PORT }}"
+    environment:
+      - PORT=${{ env.PORT }}
+      - BIND_HOST=0.0.0.0
+      - HERMES_WEBUI_PASSWORD=${{ github.event.inputs.password }}
+    volumes:
+      - hermes-data:/home/agent/.hermes
+      - ui-state:/home/agent/.hermes-web-ui
+volumes:
+  hermes-data:
+  ui-state:
+YAML
+      
+      - name: Pull image
+        run: docker pull ${{ env.IMAGE }}
+      
+      - name: Stop old
+        run: docker compose down 2>/dev/null || true
+      
+      - name: Start
+        run: docker compose up -d
+      
+      - name: Wait
+        run: |
+          for i in {1..60}; do
+            curl -s http://localhost:${{ env.PORT }} > /dev/null && echo "Ready $i" && break
+            sleep 2
+          done
+      
+      - name: Get token
+        id: token
+        run: |
+          sleep 3
+          TOK=$(docker exec hermes-webui cat /home/agent/.hermes-web-ui/.token 2>/dev/null || openssl rand -hex 32)
+          echo "token=$TOK" >> $GITHUB_OUTPUT
+      
+      - name: Setup Cloudflared
+        uses: AnimMouse/setup-cloudflared@v2
+      
+      - name: Start tunnel
+        id: tunnel
+        run: |
+          touch tunnel.log
+          nohup cloudflared tunnel --url http://localhost:${{ env.PORT }} --logfile tunnel.log --no-autoupdate > /dev/null 2>&1 &
+          sleep 15
+          URL=$(grep -o 'https://[^ ]*trycloudflare.com' tunnel.log | head -1)
+          echo "url=$URL" >> $GITHUB_OUTPUT
+      
+      - name: Results
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║         HERMES AGENT DEPLOYED!                       ║"
+          echo "╚══════════════════════════════════════════════════════╝"
+          echo ""
+          echo "URL: ${{ steps.tunnel.outputs.url }}"
+          echo "Password: ${{ github.event.inputs.password }}"
+          echo "Token: ${{ steps.token.outputs.token }}"
+          echo ""
+      
+      - name: Keep alive
+        run: sleep 120
