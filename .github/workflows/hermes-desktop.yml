@@ -1,4 +1,4 @@
-name: Hermes Agent Desktop - Remote Dashboard v6.0
+name: Hermes Agent Desktop - Remote Dashboard v8.0
 on:
   push:
     branches: [ main, master ]
@@ -12,7 +12,7 @@ jobs:
     - name: System Info
       run: |
         echo "══════════════════════════════════════════"
-        echo "  HERMES AGENT DESKTOP v6.0"
+        echo "  HERMES AGENT DESKTOP v8.0"
         echo "  Cloudflare Tunnel + Hermes Dashboard"
         echo "══════════════════════════════════════════"
         echo "Runner: $(uname -a)"
