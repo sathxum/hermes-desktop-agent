@@ -1,275 +1,46 @@
-name: Hermes Agent Desktop + Cloudflare Tunnel
+name: Hermes Agent Desktop
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   workflow_dispatch:
-
-env:
-  HERMES_VERSION: "latest"
-  TUNNEL_PORT: 8642
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 350
-    
     steps:
-    - name: 📋 System Information
+    - name: System Info
+      run: echo "Starting Hermes Agent deployment"
+    
+    - name: Install Dependencies
       run: |
-        echo "═══════════════════════════════════════════════════"
-        echo "   HERMES AGENT DESKTOP - CLOUDFLARE EDITION"
-        echo "═══════════════════════════════════════════════════"
-        echo "Runner: $(uname -a)"
-        echo "Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-        echo "Duration: 6 hours max"
-        echo "═══════════════════════════════════════════════════"
-
-    - name: 📦 Install System Dependencies
+        sudo apt-get update
+        sudo apt-get install -y curl wget git python3 nodejs npm ffmpeg
+    
+    - name: Install Cloudflared
       run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y \
-          curl wget git \
-          python3 python3-pip python3-venv \
-          nodejs npm \
-          ffmpeg \
-          xvfb \
-          dbus-x11 \
-          x11-utils \
-          x11-xserver-utils \
-          xdotool \
-          chromium-browser \
-          2>/dev/null || true
-
-    - name: 🐳 Install Docker (for container tools)
-      run: |
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sudo sh get-docker.sh 2>/dev/null || true
-        sudo usermod -aG docker $USER || true
-
-    - name: 🚀 Install Hermes Agent
-      run: |
-        echo "[INFO] Installing Hermes Agent..."
-        curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-        echo "[OK] Hermes Agent installed"
-
-    - name: ⚙️ Configure Hermes
-      run: |
-        export PATH="$HOME/.local/bin:$PATH"
-        
-        # Set default config
-        mkdir -p ~/.hermes
-        
-        # Check if hermes command exists
-        if command -v hermes &> /dev/null; then
-          echo "[OK] Hermes CLI found"
-          hermes --version || echo "Version check failed"
-        else
-          echo "[WARN] Hermes CLI not in PATH, checking install locations..."
-          ls -la ~/.hermes/ 2>/dev/null || echo "No ~/.hermes directory"
-          ls -la /usr/local/bin/hermes 2>/dev/null || echo "No /usr/local/bin/hermes"
-        fi
-
-    - name: 🌐 Install Cloudflare Tunnel (cloudflared)
-      run: |
-        echo "[INFO] Installing cloudflared..."
-        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O cloudflared
+        curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
         chmod +x cloudflared
         sudo mv cloudflared /usr/local/bin/
-        cloudflared --version
-        echo "[OK] Cloudflared installed"
-
-    - name: 🔧 Start Hermes Web Dashboard
-      run: |
-        export PATH="$HOME/.local/bin:$PATH"
-        
-        echo "[INFO] Starting Hermes web interface..."
-        
-        # Try to start Hermes gateway if available
-        if command -v hermes &> /dev/null; then
-          hermes gateway run --host 0.0.0.0 --port ${TUNNEL_PORT} &
-          HERMES_PID=$!
-          echo "Hermes PID: $HERMES_PID"
-        fi
-        
-        # Give it time to start
-        sleep 10
-        
-        # Fallback: Start a simple status page on same port
-        if ! curl -s http://localhost:${TUNNEL_PORT} > /dev/null 2>&1; then
-          echo "[INFO] Starting fallback status server..."
-          python3 << 'SERVER' &
-import http.server
-import socketserver
-import json
-import os
-from datetime import datetime
-
-PORT = 8642
-
-class StatusHandler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
-        self.end_headers()
-        
-        html = '''<!DOCTYPE html>
-<html>
-<head>
-    <title>Hermes Agent - GitHub Actions</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-            color: #e2e8f0;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .container {
-            max-width: 800px;
-            padding: 40px;
-            text-align: center;
-        }
-        h1 {
-            font-size: 3rem;
-            background: linear-gradient(135deg, #06b6d4, #8b5cf6);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 10px;
-        }
-        .subtitle {
-            color: #94a3b8;
-            margin-bottom: 30px;
-        }
-        .status-card {
-            background: rgba(30, 41, 59, 0.8);
-            border-radius: 16px;
-            padding: 30px;
-            margin: 20px 0;
-            border: 1px solid rgba(148, 163, 184, 0.2);
-        }
-        .status-item {
-            display: flex;
-            justify-content: space-between;
-            padding: 12px 0;
-            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
-        }
-        .status-label { color: #94a3b8; }
-        .status-value { color: #06b6d4; font-weight: 600; }
-        .pulse {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            background: #22c55e;
-            border-radius: 50%;
-            animation: pulse 2s infinite;
-            margin-right: 8px;
-        }
-        @keyframes pulse {
-            0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.5; transform: scale(0.9); }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🚀 Hermes Agent</h1>
-        <p class="subtitle">Self-Improving AI Agent • Running on GitHub Actions</p>
-        
-        <div class="status-card">
-            <div class="status-item">
-                <span class="status-label">Status</span>
-                <span class="status-value"><span class="pulse"></span>Running</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">Environment</span>
-                <span class="status-value">GitHub Actions Runner</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">OS</span>
-                <span class="status-value">Ubuntu Latest</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">Tunnel</span>
-                <span class="status-value">Cloudflare Tunnel</span>
-            </div>
-            <div class="status-item">
-                <span class="status-label">Session</span>
-                <span class="status-value">''' + str(datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')) + '''</span>
-            </div>
-        </div>
-        
-        <p style="color: #64748b; margin-top: 20px; font-size: 0.9rem;">
-            Remote access via Cloudflare Tunnel (check Actions logs for URL)
-        </p>
-    </div>
-</body>
-</html>'''
-        self.wfile.write(html.encode())
     
-    def log_message(self, format, *args):
-        pass  # Suppress logging
-
-with socketserver.TCPServer(("", PORT), StatusHandler) as httpd:
-    print(f"Status server running on port {PORT}")
-    httpd.serve_forever()
-SERVER
-          echo "[OK] Status server started on port ${TUNNEL_PORT}"
-        fi
-
-    - name: 🌍 Start Cloudflare Tunnel (Quick Tunnel)
+    - name: Install Hermes Agent
+      run: curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+    
+    - name: Start Status Server
       run: |
-        echo "[INFO] Starting Cloudflare Quick Tunnel..."
-        echo "This creates a public URL without needing Cloudflare account"
-        echo ""
-        
-        # Start tunnel in background
-        cloudflared tunnel --url http://localhost:${TUNNEL_PORT} 2>&1 | tee /tmp/tunnel.log &
-        TUNNEL_PID=$!
-        
-        # Wait for tunnel to start and extract URL
-        echo "[INFO] Waiting for tunnel URL..."
-        sleep 15
-        
-        TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/tunnel.log | head -1)
-        
-        if [ -n "$TUNNEL_URL" ]; then
-          echo ""
-          echo "═══════════════════════════════════════════════════"
-          echo "🎉 TUNNEL ESTABLISHED!"
-          echo "═══════════════════════════════════════════════════"
-          echo ""
-          echo "📱 PUBLIC ACCESS URL:"
-          echo "   $TUNNEL_URL"
-          echo ""
-          echo "═══════════════════════════════════════════════════"
-          echo ""
-          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
-        else
-          echo "[WARN] Could not extract tunnel URL, check /tmp/tunnel.log"
-          cat /tmp/tunnel.log
-        fi
-
-    - name: ⏱️ Keep Session Alive (6 Hours)
+        mkdir -p /tmp/www
+        echo "<html><body><h1>Hermes Agent Running</h1></body></html>" > /tmp/www/index.html
+        cd /tmp/www && python3 -m http.server 8080 &
+    
+    - name: Start Cloudflare Tunnel
       run: |
-        echo ""
-        echo "═══════════════════════════════════════════════════"
-        echo "   🔴 LIVE SESSION STARTED"
-        echo "═══════════════════════════════════════════════════"
-        echo ""
-        echo "Access your Hermes Agent at:"
-        echo "${{ env.TUNNEL_URL }}"
-        echo ""
-        echo "Session will run for 6 hours max."
-        echo "Check the Actions logs above for the tunnel URL."
-        echo ""
-        
-        # Keep alive loop
-        for i in $(seq 1 360); do
-          echo "[$(date -u '+%H:%M:%S')] Session active • ${i}/360 minutes • Remaining: $((360-i)) minutes"
+        cloudflared tunnel --url http://localhost:8080 2>&1 | tee /tmp/tunnel.log &
+        sleep 10
+        grep -o "https://[^ ]*trycloudflare.com" /tmp/tunnel.log || echo "Check logs for URL"
+    
+    - name: Keep Alive
+      run: |
+        for i in $(seq 360 -1 1); do
+          echo "Remaining: $i min"
           sleep 60
         done
