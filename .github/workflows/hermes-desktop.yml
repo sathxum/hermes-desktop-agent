@@ -1,46 +1,135 @@
-name: Hermes Agent Desktop
+name: Hermes Agent Web Dashboard
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  deploy:
+  hermes-dashboard:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
     - name: System Info
-      run: echo "Starting Hermes Agent deployment"
-    
+      run: |
+        echo "========================================"
+        echo "  HERMES AGENT WEB DASHBOARD"
+        echo "  With Cloudflare Tunnel"
+        echo "========================================"
+        echo "Runner: $(uname -a)"
+        echo "Time: $(date)"
+
     - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y curl wget git python3 nodejs npm ffmpeg
-    
+        sudo apt-get install -y curl wget git python3 python3-pip python3-venv ffmpeg
+        
     - name: Install Cloudflared
       run: |
         curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
         chmod +x cloudflared
         sudo mv cloudflared /usr/local/bin/
-    
+        cloudflared --version
+
     - name: Install Hermes Agent
-      run: curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-    
-    - name: Start Status Server
       run: |
-        mkdir -p /tmp/www
-        echo "<html><body><h1>Hermes Agent Running</h1></body></html>" > /tmp/www/index.html
-        cd /tmp/www && python3 -m http.server 8080 &
-    
+        curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+        echo 'export PATH="$HOME/.hermes/hermes-agent:$PATH"' >> $HOME/.bashrc
+        export PATH="$HOME/.hermes/hermes-agent:$PATH"
+
+    - name: Configure Hermes
+      run: |
+        mkdir -p $HOME/.hermes
+        cd $HOME/.hermes
+        cat > .env << 'ENVEOF'
+        HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin
+        HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=Hermes@2024!
+        HERMES_DASHBOARD_BASIC_AUTH_SECRET=hermes-secret-token-2024
+        HERMES_DASHBOARD_HOST=0.0.0.0
+        ENVEOF
+        chmod 600 .env
+        echo "[OK] Environment configured"
+
+    - name: Start Hermes Dashboard
+      run: |
+        export PATH="$HOME/.hermes/hermes-agent:$PATH"
+        cd $HOME/.hermes
+        
+        # Start dashboard in background on port 9119
+        nohup hermes dashboard --host 0.0.0.0 --port 9119 > dashboard.log 2>&1 &
+        sleep 8
+        
+        # Check if running
+        if curl -s http://localhost:9119/api/status > /dev/null 2>&1; then
+          echo "[SUCCESS] Hermes Dashboard is running!"
+          echo "Local URL: http://localhost:9119"
+          echo "Username: admin"
+          echo "Password: Hermes@2024!"
+        else
+          echo "[ERROR] Dashboard failed to start"
+          cat dashboard.log
+          exit 1
+        fi
+
     - name: Start Cloudflare Tunnel
       run: |
-        cloudflared tunnel --url http://localhost:8080 2>&1 | tee /tmp/tunnel.log &
-        sleep 10
-        grep -o "https://[^ ]*trycloudflare.com" /tmp/tunnel.log || echo "Check logs for URL"
-    
-    - name: Keep Alive
+        # Start tunnel exposing port 9119
+        nohup cloudflared tunnel --url http://localhost:9119 > tunnel.log 2>&1 &
+        sleep 12
+        
+        # Extract public URL
+        TUNNEL_URL=$(grep -o 'https://[^ ]*trycloudflare.com' tunnel.log | head -1)
+        
+        if [ -n "$TUNNEL_URL" ]; then
+          echo ""
+          echo "========================================"
+          echo "  HERMES DASHBOARD IS LIVE!"
+          echo "========================================"
+          echo ""
+          echo "Public URL: $TUNNEL_URL"
+          echo ""
+          echo "Credentials:"
+          echo "  Username: admin"
+          echo "  Password: Hermes@2024!"
+          echo ""
+          echo "========================================"
+          echo "$TUNNEL_URL" > $HOME/tunnel_url.txt
+        else
+          echo "[WARN] Could not extract tunnel URL"
+          echo "Check tunnel.log for details"
+          cat tunnel.log
+        fi
+
+    - name: Display Connection Info
       run: |
-        for i in $(seq 360 -1 1); do
-          echo "Remaining: $i min"
+        echo ""
+        echo "========================================"
+        echo "  CONNECTION DETAILS"
+        echo "========================================"
+        if [ -f $HOME/tunnel_url.txt ]; then
+          URL=$(cat $HOME/tunnel_url.txt)
+          echo ""
+          echo "🌐 Public URL: $URL"
+          echo ""
+          echo "Username: admin"
+          echo "Password: Hermes@2024!"
+          echo ""
+          echo "To connect Hermes Desktop App:"
+          echo "1. Open Hermes Desktop"
+          echo "2. Go to Settings → Gateway"
+          echo "3. Set Remote URL to: $URL"
+          echo "4. Click Sign in"
+          echo "5. Enter credentials above"
+          echo ""
+        fi
+        echo "========================================"
+
+    - name: Keep Alive (6 hours)
+      run: |
+        for i in $(seq 350 -1 1); do
+          echo "⏱️ Time remaining: $i minutes"
+          if [ -f $HOME/tunnel_url.txt ]; then
+            URL=$(cat $HOME/tunnel_url.txt)
+            echo "Dashboard: $URL"
+          fi
           sleep 60
         done
