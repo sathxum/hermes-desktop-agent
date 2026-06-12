@@ -1,0 +1,251 @@
+name: 🚀 Deploy Hermes Agent Web UI + Cloudflare
+
+on:
+  workflow_dispatch:
+    inputs:
+      password:
+        description: 'Password for Hermes Web UI'
+        required: true
+        default: 'HermesSecure2024!'
+      port:
+        description: 'Port for Web UI (default: 6060)'
+        required: false
+        default: '6060'
+
+env:
+  PORT: ${{ inputs.port || '6060' }}
+  WEBUI_IMAGE: ekkoye8888/hermes-web-ui
+  HERMES_DATA_DIR: ./hermes_data
+  WORKSPACE_DIR: ./workspace
+
+jobs:
+  deploy-hermes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    
+    outputs:
+      tunnel_url: ${{ steps.tunnel.outputs.url }}
+      auth_token: ${{ steps.auth.outputs.token }}
+    
+    steps:
+      # Checkout
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # Create directories
+      - name: Create workspace directories
+        run: |
+          mkdir -p ${{ env.HERMES_DATA_DIR }}/hermes-web-ui
+          mkdir -p ${{ env.WORKSPACE_DIR }}
+          echo "✅ Directories created"
+      
+      # Create docker-compose.yml
+      - name: Create Docker Compose configuration
+        run: |
+          cat > docker-compose.yml << 'EOF'
+version: "3.9"
+
+services:
+  hermes-webui:
+    image: ekkoye8888/hermes-web-ui
+    container_name: hermes-webui
+    restart: unless-stopped
+    pull_policy: always
+    ports:
+      - "${{ env.PORT }}:${{ env.PORT }}"
+    environment:
+      - PORT=${{ env.PORT }}
+      - BIND_HOST=0.0.0.0
+      - HERMES_WEBUI_PASSWORD=${{ github.event.inputs.password }}
+    volumes:
+      - hermes-data:/home/agent/.hermes
+      - hermes-webui-state:/home/agent/.hermes-web-ui
+      - ./workspace:/workspace
+
+volumes:
+  hermes-data:
+  hermes-webui-state:
+EOF
+          echo "✅ docker-compose.yml created"
+      
+      # Pull Docker image
+      - name: Pull Hermes Web UI image
+        run: |
+          echo "🔄 Pulling ${{ env.WEBUI_IMAGE }}..."
+          docker pull ${{ env.WEBUI_IMAGE }}
+          echo "✅ Image pulled"
+      
+      # Cleanup existing containers
+      - name: Cleanup existing containers
+        run: |
+          docker compose down --remove-orphans 2>/dev/null || true
+          docker rm -f hermes-webui 2>/dev/null || true
+          echo "✅ Old containers cleaned"
+      
+      # Start container
+      - name: Start Hermes Web UI
+        run: |
+          echo "🚀 Starting container..."
+          docker compose up -d
+          
+          echo ""
+          echo "📦 Container status:"
+          docker ps | grep hermes-webui
+          echo ""
+          echo "📝 Recent logs:"
+          docker compose logs --tail=10 hermes-webui
+      
+      # Wait for service
+      - name: Wait for service startup
+        run: |
+          echo "⏳ Waiting for Hermes Web UI..."
+          
+          for i in {1..90}; do
+            if curl -s -f http://localhost:${{ env.PORT }} > /dev/null 2>&1; then
+              echo "✅ Ready! (waited $i seconds)"
+              exit 0
+            fi
+            if [ $((i % 20)) -eq 0 ]; then
+              echo "   Still starting... ($i sec)"
+            fi
+            sleep 1
+          done
+          
+          echo "⚠️ Checking logs..."
+          docker compose logs --tail=20 hermes-webui
+      
+      # Get Auth Token
+      - name: Get authentication token
+        id: auth
+        run: |
+          echo "🔑 Fetching token..."
+          sleep 5
+          
+          # Try from container
+          TOKEN=$(docker exec hermes-webui cat /home/agent/.hermes-web-ui/.token 2>/dev/null || echo "")
+          
+          # Try from volume
+          if [ -z "$TOKEN" ]; then
+            TOKEN=$(cat ${{ env.HERMES_DATA_DIR }}/hermes-web-ui/.token 2>/dev/null || echo "")
+          fi
+          
+          # Generate if not found
+          if [ -z "$TOKEN" ]; then
+            echo "⚠️ Generating new token..."
+            TOKEN=$(openssl rand -hex 32)
+            docker exec hermes-webui bash -c "echo '$TOKEN' > /home/agent/.hermes-web-ui/.token" 2>/dev/null || true
+          fi
+          
+          echo "AUTH_TOKEN=$TOKEN" >> $GITHUB_ENV
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+          echo "✅ Token obtained (${#TOKEN} chars)"
+      
+      # Setup Cloudflare
+      - name: Setup Cloudflared
+        uses: AnimMouse/setup-cloudflared@v2
+      
+      # Start Tunnel
+      - name: Start Cloudflare Quick Tunnel
+        id: tunnel
+        run: |
+          echo "🌐 Starting Cloudflare Tunnel..."
+          
+          touch cloudflared.log
+          
+          nohup cloudflared tunnel --url http://localhost:${{ env.PORT }} \
+            --logfile cloudflared.log \
+            --metrics localhost:4040 \
+            --no-autoupdate > /dev/null 2>&1 &
+          
+          TUNNEL_PID=$!
+          echo "✅ Tunnel PID: $TUNNEL_PID"
+          
+          # Wait for URL
+          echo ""
+          echo "⏳ Waiting for tunnel URL..."
+          
+          for i in {1..30}; do
+            sleep 2
+            TUNNEL_URL=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' cloudflared.log | head -1)
+            if [ -n "$TUNNEL_URL" ]; then
+              echo "✅ URL: $TUNNEL_URL"
+              echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+              echo "url=$TUNNEL_URL" >> $GITHUB_OUTPUT
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "⚠️ URL not found. Log:"
+              tail -20 cloudflared.log
+            fi
+          done
+      
+      # Verify
+      - name: Verify deployment
+        run: |
+          echo ""
+          echo "╔════════════════════════════════════════════════════════════════╗"
+          echo "║         🎉 HERMES DEPLOYMENT SUCCESSFUL! 🎉                   ║"
+          echo "╚════════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "                    📋 DEPLOYMENT INFO                         "
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "🌐 PUBLIC URL:"
+          echo "   ${{ env.TUNNEL_URL }}"
+          echo ""
+          echo "🔐 PASSWORD:"
+          echo "   ${{ github.event.inputs.password }}"
+          echo ""
+          echo "🔑 AUTH TOKEN:"
+          echo "   ${{ env.AUTH_TOKEN }}"
+          echo ""
+          echo "💻 LOCAL URL:"
+          echo "   http://localhost:${{ env.PORT }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:${{ env.PORT }} || echo "000")
+          echo "🔍 Health: HTTP $HTTP_CODE"
+          echo ""
+          
+          docker ps --filter "name=hermes-webui" --format "table {{.Names}}\t{{.Status}}"
+          echo ""
+      
+      # Keep alive
+      - name: Keep services running
+        run: |
+          echo "⏳ Keeping alive for testing (3 minutes)..."
+          sleep 180 || true
+
+  verify:
+    needs: deploy-hermes
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Verification report
+        run: |
+          echo ""
+          echo "╔════════════════════════════════════════════════════════════════╗"
+          echo "║                  📊 VERIFICATION REPORT                        ║"
+          echo "╚════════════════════════════════════════════════════════════════╝"
+          echo ""
+          echo "Status: ${{ needs.deploy-hermes.result }}"
+          echo ""
+          
+          if [ "${{ needs.deploy-hermes.result }}" = "success" ]; then
+            echo "✅ Deployment successful!"
+            echo ""
+            echo "🔗 Access at: ${{ needs.deploy-hermes.outputs.tunnel_url }}"
+            echo "🔐 Password: ${{ github.event.inputs.password }}"
+            echo ""
+            echo "📝 Next steps:"
+            echo "   1. Open URL in browser"
+            echo "   2. Enter password"
+            echo "   3. Configure AI model"
+            echo ""
+          else
+            echo "❌ Check logs above"
+          fi
